@@ -1,0 +1,267 @@
+digraph graph_name {
+
+graph [
+//	charset = "UTF-8",
+          label = "error line # handling overview (gcc-13.3.0)"
+        , labelloc = "t"
+        , labeljust = "c"
+        , bgcolor = "#343434"
+        , fontcolor = white
+        , fontsize = 18
+        , style = "filled"
+        , rankdir = LR
+        , margin = 0.2
+        , splines = spline
+        , ranksep = 1.0
+        , layout = dot
+        , nodesep = 0.9
+];
+
+node [
+          colorscheme = "rdylgn11"
+        , style = "solid,filled"
+        , fontsize = 16
+        , fontcolor = 6
+        , fontname = "Migu 1M"
+        , color = 7
+        , fillcolor = "#808000"
+        , fixedsize = true
+        , height = 0.6
+        , width = 1.2
+];
+
+
+edge [
+          style = solid
+        , fontsize = 12
+        , fontcolor = white
+        , fontname = "Migu 1M"
+        , color = white
+        , labelfloat = true
+        , labeldistance = 2.5
+        , labelangle = 70
+];
+
+// ------------------------------------------------------------
+// edge
+
+line_table -> info_ordinary_maps [ label = "line_maps::info_ordinary\n"
+                                         + "maps_info_ordinary::maps[]"
+                                 , style = dotted
+];
+info_ordinary_maps -> line_map_ordinary [ label = "bynary seek"
+                                        , style = bold, color = magenta2
+];
+
+input_location -> location_range;
+input_location -> info_ordinary_maps;
+
+c_parser -> gimple_parser_o;
+gimple_parser_o -> c_parser_o [ style = dotted ];
+
+c_parser -> c_parser_o;
+c_parser_o -> line_map_o [ style = dotted ];
+c_parser_o -> rich_location [ style = bold, color = magenta2 ];
+line_map_o -> source_range [ style = dotted ];
+c_parser_o -> c_common_o [ label = "c_parse_error()"
+                         , style = dotted
+];
+
+c_common_o -> diagnostic_o [ style = dotted ];
+
+diagnostic_o -> c_opts_o [ style = dotted ];
+diagnostic_o -> diagnostic_info [ style = dotted ];
+rich_location -> diagnostic_info [ style = bold, color = magenta2 ];
+
+diagnostic_info -> c_opts_o [ style = dotted ];
+c_opts_o -> diagnostic_show_locus_o [ style = dotted ];
+diagnostic_show_locus_o -> layout [ style = dotted ];
+
+diagnostic_show_locus_o -> genmatch_o [ label = "linemap_client\n"
+                                              + "_expand_location\n"
+                                              + "_to_spelling_point()"
+                                      , style = dotted
+];
+genmatch_o -> line_map_o [ label = "linemap_resolve_location()\n"
+                                 + "linemap_expand_location()"
+                         , style = dotted
+];
+line_map_o -> line_map_ordinary [ label = "linemap_macro_loc\n"
+                                        + "_to_spelling_point()"
+                                , style = dotted
+];
+line_map_ordinary -> expanded_location1;
+line_map_ordinary -> expanded_location2;
+line_map_o -> expanded_location1 [ label = "LINEMAP_FILE()\n"
+                                         + "SOURCE_LINE()\n"
+                                         + "SOURCE_COLUMN()"
+                                 , style = dotted
+];
+line_map_o -> expanded_location2 [ label = "LINEMAP_FILE()\n"
+                                         + "SOURCE_LINE()\n"
+                                         + "SOURCE_COLUMN()"
+                                 , style = dotted
+];
+
+rich_location -> location_range [ label = "rich_location::\n"
+                                        + "ctor()\n"
+                                        + "add_range()\n"
+                                        + "↓\n"
+                                        + "m_ranges"
+                                , style = dotted
+];
+location_range -> source_range [ label = "get_range_from_loc()\l"
+                                       + "- linemap_lookup()\l"
+                                       + "- linemap_check_ordinary()\l"
+                               , style = bold, color = magenta2
+];
+source_range   -> expanded_location1 [ style = bold, color = magenta2 ];
+location_range -> expanded_location2 [ style = bold, color = magenta2 ];
+expanded_location1 -> exploc_with_display_col1 [ dir = none ];
+expanded_location2 -> exploc_with_display_col2 [ dir = none ];
+exploc_with_display_col1 -> layout_point1 [ dir = none ];
+exploc_with_display_col2 -> layout_point2 [ dir = none ];
+layout_point1 -> layout_range [ style = bold, color = magenta2 ];
+layout_point2 -> layout_range [ style = bold, color = magenta2 ];
+layout -> layout_range [ label = "layout::\n"
+                               + "- ctor()\n"
+                               + "  - maybe_add_location_range()\n"
+                               + "↓\n"
+                               + "m_layout_ranges"
+                       , style = dotted
+];
+
+layout -> line_span [ label = "layout::\n"
+                            + "- ctor()\n"
+                            + "  - calculate_line_spans()\n"
+                            + "↓\n"
+                            + "m_line_spans"
+                    , style = dotted
+];
+layout_range -> line_span [ style = bold, color = magenta2 ];
+
+line_span -> row [ style = dotted ];
+
+// ------------------------------------------------------------
+// node
+
+gimple_parser_o[ label = "gimple\n" + "-parser.o"
+               , fillcolor = 11 // green
+               , width = 1.4, height = 0.9
+];
+c_parser_o [ label = "c-parser.o"
+           , fillcolor = 11 // green
+           , width = 1.4, height = 0.9
+];
+line_map_o [ label = "line-map.o"
+           , fillcolor = 11 // green
+           , width = 1.4, height = 0.9
+];
+c_common_o [ label = "c-common.o"
+           , fillcolor = 11 // green
+           , width = 1.4, height = 0.9
+];
+diagnostic_o [ label = "diagnostic.o"
+             , fillcolor = 11 // green
+             , width = 1.4, height = 0.9
+];
+c_opts_o [ label = "c-opts.o"
+         , fillcolor = 11 // green
+         , width = 1.0, height = 0.9
+];
+diagnostic_show_locus_o [ label = "diagnostic\n" + "-show-locus.o"
+                        , fillcolor = 11 // green
+                        , width = 1.5, height = 0.9
+];
+
+diagnostic_info [ label = "diagnostic_info"
+                , width = 1.4, height = 0.9
+];
+
+c_parser [ label = "c_parser"
+         , width = 1.4, height = 0.9
+];
+line_table [ label = "::line_table\n"
+                   + "(line_maps *)"
+           , fillcolor = "#800080"
+           , shape = box, width = 1.6, height = 0.9
+];
+input_location [ label = "::input_location\n"
+                       + "(location_t)\n"
+                       + "line\n"
+                       + "column\n"
+                       + "range"
+               , fillcolor = "#800080"
+               , shape = box, width = 1.7, height = 1.5
+];
+rich_location [ fillcolor = 11 // green
+              , width = 1.4, height = 0.9
+];
+location_range [ label = "location_range[]\n"
+                       + "m_loc"
+               , width = 1.4, height = 0.9
+];
+source_range [ label = "source_range\n"
+                       + "m_start\n"
+                       + "m_finish"
+             , width = 1.4, height = 1.2
+];
+genmatch_o [ label = "genmatch.o"
+           , fillcolor = 11 // green
+           , width = 1.4, height = 0.9
+];
+info_ordinary_maps [ label = "line_map[]"
+                   , width = 1.4, height = 0.9
+];
+line_map_ordinary [ label = "map\n"
+                           + "(line_map_ordinary)\n"
+                           + "start_position\n"
+                           + "to_line"
+                   , width = 1.4, height = 1.2
+];
+expanded_location1 [ label = "(expanded_location)\n"
+                           + "start\n"
+                           + "finish\n"
+                   , width = 1.4, height = 0.9
+];
+expanded_location2 [ label = "(expanded_location)\n"
+                           + "caret\n"
+                   , width = 1.4, height = 0.9
+];
+exploc_with_display_col1 [ label = "exploc_with\n"
+                                 + "_display_col"
+                         , width = 1.4, height = 0.9
+];
+exploc_with_display_col2 [ label = "exploc_with\n"
+                                 + "_display_col"
+                         , width = 1.4, height = 0.9
+];
+layout_point1 [ label = "layout_point\n"
+                      + "m_line\n"
+                      + "m_columns[2]"
+              , width = 1.4, height = 0.9
+];
+layout_point2 [ label = "layout_point\n"
+                      + "m_line\n"
+                      + "m_columns[2]"
+              , width = 1.4, height = 0.9
+];
+layout_range [ label = "layout_range[]\n"
+             , width = 1.4, height = 0.9
+];
+layout [ label = "layout"
+       , fillcolor = 11 // green
+       , width = 1.0, height = 0.9
+];
+line_span [ label = "line_span[]"
+          , width = 1.0, height = 0.9
+];
+
+row [ label = "(unsigned)\n"
+            + "0 <= # < N"
+    , fillcolor = "#800080"
+    , shape = box, width = 2.1, height = 0.9
+];
+
+// ------------------------------------------------------------
+}

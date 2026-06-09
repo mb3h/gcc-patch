@@ -1,0 +1,479 @@
+--- gcc/diagnostic.old.cc	2024-05-21 07:47:38.000000000 +0000
++++ gcc/diagnostic.cc	2026-04-12 23:59:59.000000000 +0000
+@@ -511,7 +511,10 @@
+     }
+ 
+   expanded_location s = diagnostic_expand_location (diagnostic);
++  int delta = diagnostic->richloc->calc_naked_line_delta ();
++  patch_location_get_source_line (delta);
+   char *location_text = diagnostic_get_location_text (context, s);
++  patch_location_get_source_line (0);
+ 
+   char *result = build_message_string ("%s %s%s%s", location_text,
+ 				       text_cs, text, text_ce);
+--- gcc/diagnostic-show-locus.old.cc	2024-05-21 07:47:38.000000000 +0000
++++ gcc/diagnostic-show-locus.cc	2026-04-12 23:59:59.000000000 +0000
+@@ -432,6 +432,7 @@
+   char_display_policy m_policy;
+   location_t m_primary_loc;
+   exploc_with_display_col m_exploc;
++  int m_naked_line_delta;
+   colorizer m_colorizer;
+   bool m_colorize_source_p;
+   bool m_show_labels_p;
+@@ -1190,6 +1191,7 @@
+   m_primary_loc (richloc->get_range (0)->m_loc),
+   m_exploc (richloc->get_expanded_location (0), m_policy,
+ 	    LOCATION_ASPECT_CARET),
++  m_naked_line_delta (richloc->calc_naked_line_delta ()),
+   m_colorizer (context, diagnostic_kind),
+   m_colorize_source_p (context->colorize_source_p),
+   m_show_labels_p (context->show_labels_p),
+@@ -2783,7 +2785,9 @@
+ void
+ layout::print_line (linenum_type row)
+ {
++  patch_location_get_source_line (m_naked_line_delta);
+   char_span line = location_get_source_line (m_exploc.file, row);
++  patch_location_get_source_line (0);
+   if (!line)
+     return;
+ 
+@@ -2851,7 +2855,10 @@
+ 
+   context->last_location = loc;
+ 
++  int delta = richloc->calc_naked_line_delta ();
++  patch_location_get_source_line (delta);
+   layout layout (context, richloc, diagnostic_kind);
++  patch_location_get_source_line (0);
+   for (int line_span_idx = 0; line_span_idx < layout.get_num_line_spans ();
+        line_span_idx++)
+     {
+--- libcpp/line-map.old.cc	2024-05-21 07:47:41.000000000 +0000
++++ libcpp/line-map.cc	2026-04-12 23:59:59.000000000 +0000
+@@ -26,6 +26,8 @@
+ #include "internal.h"
+ #include "hashtab.h"
+ 
++#define DEFAULT_COLUMN_BITS 7
++
+ static void trace_include (const line_maps *, const line_map_ordinary *);
+ static const line_map_ordinary * linemap_ordinary_map_lookup (const line_maps *,
+ 							      location_t);
+@@ -387,6 +389,7 @@
+   set->reallocator = xrealloc;
+   set->highest_location = RESERVED_LOCATION_COUNT - 1;
+   set->highest_line = RESERVED_LOCATION_COUNT - 1;
++  set->highest_column_and_range_bits = 0;
+   set->location_adhoc_data_map.htab =
+       htab_create (100, location_adhoc_data_hash, location_adhoc_data_eq, NULL);
+   set->builtin_location = builtin_location;
+@@ -493,6 +496,24 @@
+   return result;
+ }
+ 
++/* Wrapper function of new_linemap(). This initializes
++   "start_line" in addition to original behavior. */
++
++static struct line_map *
++new_linemap2 (line_maps *set, location_t start_location,
++                              location_t start_line)
++{
++  line_map *result = new_linemap (set, start_location);
++  if (NULL == result)
++    return NULL;
++
++  linemap_assert (MAP_ORDINARY_P (result));
++  line_map_ordinary *map = (line_map_ordinary *)result;
++  map->start_line = start_line;
++
++  return result;
++}
++
+ /* Return the location of the last source line within an ordinary
+    map.  */
+ inline location_t
+@@ -553,8 +574,18 @@
+     /* We ran out of line map space.   */
+     start_location = 0;
+ 
++  location_t start_line;
++  if (LC_LEAVE == reason)
++    start_line = start_location;
++  else {
++    start_line = set->highest_line + 1;
++    start_line += (1 << range_bits) - 1;
++    start_line &=  ~((1 << range_bits) - 1);
++  }
++
+   line_map_ordinary *map
+-    = linemap_check_ordinary (new_linemap (set, start_location));
++    = linemap_check_ordinary (new_linemap2 (set, start_location,
++                                            start_line));
+   map->reason = reason;
+ 
+   if (to_file && *to_file == '\0' && reason != LC_RENAME_VERBATIM)
+@@ -695,6 +726,24 @@
+   return LINEMAPS_MACRO_MAPS (set) != NULL;
+ }
+ 
++/* Returns new 'location_t' value after changing bit-boundary between
++   'line' and 'column' of old 'location_t' value */
++static location_t
++location_change_line_lsb (location_t loc_old, unsigned int line_lsb_old,
++                          unsigned int line_lsb_new)
++{
++  /* Adjust bits layout. */
++  unsigned line
++    = loc_old >> line_lsb_old;
++  unsigned column_and_range
++    = loc_old & ((1U << line_lsb_old) -1);
++
++  linemap_assert (column_and_range < (1U << line_lsb_new));
++  location_t new_loc
++    = (line << line_lsb_new) | column_and_range;
++  return new_loc;
++}
++
+ /* Create a macro map.  A macro map encodes source locations of tokens
+    that are part of a macro replacement-list, at a macro expansion
+    point.  See the extensive comments of struct line_map and struct
+@@ -821,7 +870,7 @@
+     max_column_hint = set->max_column_hint;
+   if (add_map)
+     {
+-      int column_bits;
++      unsigned column_bits;
+       int range_bits;
+       if (max_column_hint > LINE_MAP_MAX_COLUMN_NUMBER
+ 	  || highest > LINE_MAP_MAX_LOCATION_WITH_COLS)
+@@ -837,7 +886,7 @@
+ 	}
+       else
+ 	{
+-	  column_bits = 7;
++	  column_bits = DEFAULT_COLUMN_BITS;
+ 	  if (highest <= LINE_MAP_MAX_LOCATION_WITH_PACKED_RANGES)
+ 	    range_bits = set->default_range_bits;
+ 	  else
+@@ -865,6 +914,31 @@
+ 				ORDINARY_MAP_IN_SYSTEM_HEADER_P (map),
+ 				ORDINARY_MAP_FILE_NAME (map),
+ 				to_line)));
++
++      /* Bits layout of .start_location will be changed? */
++      if (0 == set->highest_column_and_range_bits)
++        set->highest_column_and_range_bits = DEFAULT_COLUMN_BITS
++                                           + set->default_range_bits;
++      if (set->highest_column_and_range_bits != column_bits)
++        {
++          /* "line_maps" doesn't have "column_and_range_bits" related with
++             "highest_location", so "highest_location" always has to be set
++             related with the default "column_and_range_bits". */
++
++          map->start_location
++            = location_change_line_lsb (map->start_location,
++                                        set->highest_column_and_range_bits,
++                                        column_bits);
++          map->start_line
++            = location_change_line_lsb (map->start_line,
++                                        set->highest_column_and_range_bits,
++                                        column_bits);
++          set->highest_location
++            = location_change_line_lsb (set->highest_location,
++                                        set->highest_column_and_range_bits,
++                                        column_bits);
++          set->highest_column_and_range_bits = column_bits;
++        }
+       map->m_column_and_range_bits = column_bits;
+       map->m_range_bits = range_bits;
+       r = (MAP_START_LOCATION (map)
+@@ -1057,6 +1131,16 @@
+   return linemap_ordinary_map_lookup (set, line);
+ }
+ 
++static location_t
++MAP_START_LOCATION2 (const line_map_ordinary *map,
++                     unsigned int required_line_lsb)
++{
++  location_t a, b;
++  a = map->start_location;
++  b = location_change_line_lsb (a, map->m_column_and_range_bits,
++                                required_line_lsb);
++  return b;
++}
+ /* Given a source location yielded by an ordinary map, returns that
+    map.  Since the set is built chronologically, the logical lines are
+    monotonic increasing, and so the list is sorted and we can use a
+@@ -1076,9 +1160,13 @@
+ 
+   const line_map_ordinary *cached = LINEMAPS_ORDINARY_MAP_AT (set, mn);
+   /* We should get a segfault if no line_maps have been added yet.  */
+-  if (line >= MAP_START_LOCATION (cached))
++  
++  unsigned default_line_lsb /* must be adapted to 'line' parameter */
++    = DEFAULT_COLUMN_BITS + set->default_range_bits;
++  if (line >= MAP_START_LOCATION2 (cached, default_line_lsb))
+     {
+-      if (mn + 1 == mx || line < MAP_START_LOCATION (&cached[1]))
++      if (mn + 1 == mx || line < MAP_START_LOCATION2 (&cached[1],
++                                                      default_line_lsb))
+ 	return cached;
+     }
+   else
+@@ -1090,7 +1178,8 @@
+   while (mx - mn > 1)
+     {
+       unsigned md = (mn + mx) / 2;
+-      if (MAP_START_LOCATION (LINEMAPS_ORDINARY_MAP_AT (set, md)) > line)
++      if (MAP_START_LOCATION2 (LINEMAPS_ORDINARY_MAP_AT (set, md),
++                               default_line_lsb) > line)
+ 	mx = md;
+       else
+ 	mn = md;
+@@ -1098,7 +1187,7 @@
+ 
+   LINEMAPS_ORDINARY_CACHE (set) = mn;
+   const line_map_ordinary *result = LINEMAPS_ORDINARY_MAP_AT (set, mn);
+-  linemap_assert (line >= MAP_START_LOCATION (result));
++  linemap_assert (line >= MAP_START_LOCATION2 (result, default_line_lsb));
+   return result;
+ }
+ 
+@@ -1863,6 +1952,115 @@
+   return xloc;
+ }
+ 
++/* Get naked line number removed effects of '#line'.
++
++   CONSTRAINT:
++   1. This omits thread-safe, because it expects available for the error
++      message only. If error_at() requires to be called without being
++      serialized among threads, it probably needs either of a) or b).
++
++      a) disable the code about caching and resuming.
++         (TRADEOFF: it might cause getting slow)
++      b) change the place for caching and resuming information from static
++         memory into stack/heap memory at any of functions that are called
++         by error_at().
++         (TRADEOFF: widely tuning cost about interface design)
++ */
++static int
++linemap_ordinary_map_calc_naked_start_line
++  (class line_maps *set, const struct line_map_ordinary *goal)
++{
++#if 1 /* caching & resuming (for performance) */
++  static struct
++  {
++    const char *to_file;
++    const line_map_ordinary *map;
++    unsigned total_counted;
++  } s_cache
++    = { NULL, NULL, 0 };
++#endif
++
++  const struct line_map_ordinary *begin
++    = LINEMAPS_ORDINARY_MAPS (set);
++  linemap_assert (begin <= goal
++                  && goal < begin + LINEMAPS_ORDINARY_USED (set));
++  
++  unsigned total_counted = 0;
++  unsigned counting_start, counting_end;
++  enum {
++    PENDING = 0,
++    COUNTING
++  } state = PENDING;
++
++  const char *goal_to_file = ORDINARY_MAP_FILE_NAME (goal);
++  const line_map_ordinary *map = begin;
++#if 1 /* caching & resuming (for performance) */
++  if (s_cache.to_file == goal_to_file
++      && begin <= s_cache.map && s_cache.map <= goal)
++    {
++   /* state         = PENDING; */
++      map           = s_cache.map;
++      total_counted = s_cache.total_counted;
++    }
++  else
++    {
++      s_cache.to_file       = goal_to_file;
++      s_cache.map           = NULL;
++      s_cache.total_counted = 0;
++    }
++#endif
++  for (; map < goal; ++map)
++    {
++      const line_map_ordinary *includer_map;
++      switch (state)
++        {
++        case PENDING:
++          if (goal_to_file != ORDINARY_MAP_FILE_NAME (map))
++            continue;
++          if (map->reason != LC_RENAME && map->reason != LC_LEAVE)
++            continue;
++#if 1 /* caching & resuming (for performance) */
++          if (begin < map)
++            {
++              s_cache.map           = map;
++              s_cache.total_counted = total_counted;
++            }
++#endif
++          state = COUNTING;
++          counting_start
++            = map->start_location >> map->m_column_and_range_bits;
++          break;
++        
++        default: /*case COUNTING:*/
++          includer_map = linemap_included_from_linemap (set, map);
++          if (! (map->reason == LC_RENAME
++              || map->reason == LC_ENTER && includer_map &&
++                 goal_to_file == ORDINARY_MAP_FILE_NAME (includer_map)
++          ))
++            continue;
++          counting_end
++            = map->start_line >> map->m_column_and_range_bits;
++          total_counted += counting_end - counting_start;
++          if (map->reason == LC_RENAME) {
++            counting_start
++              = map->start_location >> map->m_column_and_range_bits;
++            continue;
++          }
++          state = PENDING;
++          break;
++        }
++    }
++
++  if (COUNTING == state)
++    {
++      counting_end
++        = goal->start_line >> goal->m_column_and_range_bits;
++      total_counted += counting_end - counting_start;
++    }
++
++  return (int)(1 + total_counted);
++}
++
+ 
+ /* Dump line map at index IX in line table SET to STREAM.  If STREAM
+    is NULL, use stderr.  IS_MACRO is true if the caller wants to
+@@ -2189,6 +2387,38 @@
+ 	     (get_loc (idx), LOCATION_ASPECT_CARET);
+ }
+ 
++/* Get difference naked line number removed effects of '#line'.  */
++
++int
++rich_location::calc_naked_line_delta ()
++{
++  /* a point of calculation */
++  location_t loc = get_range (0)->m_loc;
++
++  /* give up as unexpected */
++  if (m_line_table == NULL)
++    return 0;
++  const line_map_ordinary *last_map
++    = LINEMAPS_LAST_ORDINARY_MAP (m_line_table);
++  if (! (last_map && MAP_START_LOCATION (last_map) <= loc))
++    return 0;
++
++  /* get a map that includes the point */
++  const struct line_map_ordinary *map
++    = linemap_ordinary_map_lookup (m_line_table, loc);
++
++  /* naked line ('#line' not affected) */
++  int naked_start_line
++    = linemap_ordinary_map_calc_naked_start_line (m_line_table, map);
++  int offset_line
++    = ((loc - map->start_location) >> map->m_column_and_range_bits);
++
++  /* normal line ('#line' affected) */
++  int line = SOURCE_LINE (map, loc);
++
++  return naked_start_line + offset_line - line;
++}
++
+ /* Set the column of the primary location, with 0 meaning
+    "don't override it".  */
+ 
+--- libcpp/include/line-map.old.h	2024-05-21 07:47:41.000000000 +0000
++++ libcpp/include/line-map.h	2026-04-12 23:59:59.000000000 +0000
+@@ -446,7 +446,12 @@
+      within a map.  */
+   location_t included_from;
+ 
+-  /* Size is 20 or 24 bytes, no padding  */
++  /* Head of a line that includes "start_location". This means and
++     works at a map that was appended by overflow of column (= a map
++     that more wide "effective column bits" is given). */
++  location_t start_line;
++
++  /* Size is 24 or 32 (4 bytes padding on 64-bit).  */
+ };
+ 
+ /* This is the highest possible source location encoded within an
+@@ -804,6 +809,10 @@
+   /* Start of line of highest location_t "given out".  */
+   location_t highest_line;
+ 
++  /* column_and_range_bits (= LSB of "row bits") in "highest_location"
++     and "highest_line". */
++  unsigned int highest_column_and_range_bits;
++
+   /* The maximum column number we can quickly allocate.  Higher numbers
+      may require allocating a new line_map.  */
+   unsigned int max_column_hint;
+@@ -1703,6 +1712,8 @@
+ 
+   expanded_location get_expanded_location (unsigned int idx);
+ 
++  int calc_naked_line_delta ();
++
+   void
+   override_column (int column);
+ 
+--- gcc/input.old.cc	2024-05-21 07:47:38.000000000 +0000
++++ gcc/input.cc	2026-04-12 23:59:59.000000000 +0000
+@@ -944,6 +944,24 @@
+   return get_next_line (line, line_len);
+ }
+ 
++/* Get difference naked line number removed effects of '#line'.
++
++   CONSTRAINT:
++   1. This omits thread-safe, because it expects available for the error
++      message only. If error_at() requires to be called without being
++      serialized about threads, it probably needs the below.
++
++      - change the place for caching and resuming information from static
++        memory into stack/heap memory at any of functions that are called
++        by error_at().
++        (TRADEOFF: widely tuning cost about interface design)
++ */
++static int s_naked_line_delta = 0;
++void
++patch_location_get_source_line (int naked_line_delta)
++{
++  s_naked_line_delta = naked_line_delta;
++}
+ /* Return the physical source line that corresponds to FILE_PATH/LINE.
+    The line is not nul-terminated.  The returned pointer is only
+    valid until the next call of location_get_source_line.
+@@ -969,6 +987,7 @@
+   if (c == NULL)
+     return char_span (NULL, 0);
+ 
++  line += s_naked_line_delta;
+   bool read = c->read_line_num (line, &buffer, &len);
+   if (!read)
+     return char_span (NULL, 0);
+--- gcc/input.old.h	2024-05-21 07:47:38.000000000 +0000
++++ gcc/input.h	2026-04-12 23:59:59.000000000 +0000
+@@ -113,6 +113,7 @@
+   size_t m_n_elts;
+ };
+ 
++extern void patch_location_get_source_line (int naked_line_delta);
+ extern char_span location_get_source_line (const char *file_path, int line);
+ extern char *get_source_text_between (location_t, location_t);
+ extern char_span get_source_file_content (const char *file_path);
